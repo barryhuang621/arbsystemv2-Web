@@ -53,6 +53,7 @@ export default function App() {
         <button
           onClick={handleConnectQuote}
           style={{
+            marginLeft: 'auto',
             padding: '10px 20px',
             borderRadius: '8px',
             fontWeight: '600',
