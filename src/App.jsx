@@ -73,7 +73,7 @@ export default function App() {
 
     const hostOnly = cleanHost.replace(/^https?:\/\//, '');
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${hostOnly}/ws/fubon`;
+    const wsUrl = `${protocol}//${hostOnly}/ws/fubon?client_type=stock-futures-arb`;
 
     console.log(`[Web UI] 按下連線，正在建立與 NAS 中繼站的即時 WebSocket 通道: ${wsUrl}`);
 
@@ -216,7 +216,7 @@ export default function App() {
         const res = await fetch(`${baseUrl}/api/v1/fubon/connect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cost_params: costParams })
+          body: JSON.stringify({ client_type: 'stock-futures-arb', cost_params: costParams })
         });
         const data = await res.json();
         setApiResponse(data);
