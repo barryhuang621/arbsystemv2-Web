@@ -21,6 +21,7 @@ export default function App() {
   const [contractMonthType, setContractMonthType] = useState('current'); // 'current' (當月) | 'next' (次月)
   const [showNasLog, setShowNasLog] = useState(false); // 控制中繼伺服器 Console 是否顯示報價明細
   const [recordNasLog, setRecordNasLog] = useState(false); // 控制中繼伺服器 是否寫入 JSONL 報價紀錄檔 (預設 false)
+  const [onlyPositiveProfit, setOnlyPositiveProfit] = useState(false); // 只顯示正利潤標的 (預設 false)
 
   // 計算期貨 5 碼合約代碼後綴 (第4碼月份字母 A~L + 第5碼年份個位數，支援跨年度)
   const getContractSuffix = (type = contractMonthType) => {
@@ -107,8 +108,9 @@ export default function App() {
                   futBidPrice: data.futBidPrice !== undefined ? data.futBidPrice : newList[idx].futBidPrice,
                   futBidVol: data.futBidVol !== undefined ? data.futBidVol : newList[idx].futBidVol,
                   spreadVal: data.spreadValue !== undefined ? data.spreadValue : newList[idx].spreadVal,
-                  estimatedProfit: data.profitAmount !== undefined ? data.profitAmount : newList[idx].estimatedProfit,
-                  marginPercent: data.profitMargin !== undefined ? data.profitMargin : newList[idx].marginPercent,
+                  profitVal: data.profitAmount !== undefined ? data.profitAmount : newList[idx].profitVal,
+                  totalInvestmentVal: data.totalInvestment !== undefined ? data.totalInvestment : newList[idx].totalInvestmentVal,
+                  marginVal: data.profitMargin !== undefined ? data.profitMargin : newList[idx].marginVal,
                 };
               }
               return newList;
@@ -345,14 +347,23 @@ export default function App() {
       console.error('❗ 切換中繼 Log 顯示失敗:', err);
     }
   };
-  // 篩選搜尋關鍵字 (移至最前以供訂閱功能使用)
+  // 篩選搜尋關鍵字與正利潤過濾 (移至最前以供訂閱功能使用)
   const filteredTargets = (targetsList || []).filter((item) => {
-    if (!searchTerm || !searchTerm.trim()) return true;
-    const term = searchTerm.trim().toLowerCase();
-    const code = (item.StockCode || '').toLowerCase();
-    const name = (item.StockName || '').toLowerCase();
-    const contract = (item.Contract || '').toLowerCase();
-    return code.includes(term) || name.includes(term) || contract.includes(term);
+    if (searchTerm && searchTerm.trim()) {
+      const term = searchTerm.trim().toLowerCase();
+      const code = (item.StockCode || '').toLowerCase();
+      const name = (item.StockName || '').toLowerCase();
+      const contract = (item.Contract || '').toLowerCase();
+      const match = code.includes(term) || name.includes(term) || contract.includes(term);
+      if (!match) return false;
+    }
+
+    if (onlyPositiveProfit) {
+      const profit = item.profitVal !== undefined ? item.profitVal : (item.estimatedProfit !== undefined ? item.estimatedProfit : null);
+      if (profit == null || profit <= 0) return false;
+    }
+
+    return true;
   });
   // 1.2 發送訂閱股票 REST API 指令
   const handleSubscribeStocks = async () => {
@@ -884,6 +895,39 @@ export default function App() {
                     次月 ({getContractSuffix('next')})
                   </label>
                 </div>
+
+                {/* 🔥 只顯示正利潤 Checkbox */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  marginLeft: '4px',
+                  paddingLeft: '8px',
+                  borderLeft: '1px solid #334155'
+                }}>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    fontWeight: '700',
+                    color: onlyPositiveProfit ? '#ef4444' : '#94a3b8',
+                    backgroundColor: onlyPositiveProfit ? 'rgba(239, 68, 68, 0.15)' : 'rgba(15, 23, 42, 0.6)',
+                    border: `1px solid ${onlyPositiveProfit ? '#ef4444' : '#334155'}`,
+                    borderRadius: '4px',
+                    padding: '2px 8px',
+                    transition: 'all 0.15s ease',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={onlyPositiveProfit}
+                      onChange={(e) => setOnlyPositiveProfit(e.target.checked)}
+                      style={{ accentColor: '#ef4444', cursor: 'pointer' }}
+                    />
+                    🔥 只顯示正利潤
+                  </label>
+                </div>
               </div>
             </div>
           </div>
@@ -936,8 +980,9 @@ export default function App() {
                     <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>8. 股票賣量 (AskVol)</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right', color: '#f59e0b', fontWeight: '700' }}>9. 套利價差 (元)</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right', color: '#ef4444', fontWeight: '700' }}>10. 預估利潤 (金額)</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#ef4444', fontWeight: '700' }}>11. 套利空間 (%)</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>12. 快速操作</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>11. 總投入成本 (本金+費用)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#ef4444', fontWeight: '700' }}>12. 套利空間 (%)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>13. 快速操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -947,7 +992,7 @@ export default function App() {
                     const futBidPrice = row.futBidPrice != null ? row.futBidPrice : null;
                     const futBidVol = row.futBidVol != null ? row.futBidVol : null;
 
-                    // 判斷現貨賣單數量是否不足 2 張 (對沖 1 口期貨需要 2 張股票，若 AskVol < 2 或是漲停無賣單則以灰階顯示)
+                    // 判斷現貨賣單數量是否不足 2 張 (對沖 1 口期貨需要 2 張股票，若 AskVol < 2 或是無賣單則以灰階顯示)
                     const isLowAskVol = stockAskVol == null || Number(stockAskVol) < 2;
 
                     // 計算股票期貨完整代號
@@ -957,6 +1002,7 @@ export default function App() {
                     const hasSpread = futBidPrice != null && stockAskPrice != null;
                     const spreadVal = row.spreadVal !== undefined ? row.spreadVal : (hasSpread ? (futBidPrice - stockAskPrice) : null);
                     const profitVal = row.profitVal !== undefined ? row.profitVal : (row.estimatedProfit !== undefined ? row.estimatedProfit : null);
+                    const totalInvestmentVal = row.totalInvestmentVal !== undefined ? row.totalInvestmentVal : (stockAskPrice != null ? Math.round(stockAskPrice * 2000) : null);
                     const marginVal = row.marginVal !== undefined ? row.marginVal : (row.marginPercent !== undefined ? row.marginPercent : (hasSpread && stockAskPrice > 0 ? ((futBidPrice - stockAskPrice) / stockAskPrice * 100) : null));
 
                     // 價差與利潤顏色：正數紅、負數綠 (台灣台股慣用)；當賣單 < 2 張時以灰階顯示
@@ -1048,9 +1094,9 @@ export default function App() {
                           {stockAskPrice != null ? Number(stockAskPrice).toFixed(2) : '-'}
                         </td>
 
-                        {/* 8. 股票賣量 (AskVol) (右對齊，漲停或小於 2 張呈灰階) */}
+                        {/* 8. 股票賣量 (AskVol) (右對齊，無賣單或小於 2 張呈灰階) */}
                         <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: isLowAskVol ? '#64748b' : '#cbd5e1', fontWeight: isLowAskVol ? '400' : '600', whiteSpace: 'nowrap' }}>
-                          {stockAskVol != null ? (stockAskVol === 0 ? '0 (漲停)' : Number(stockAskVol).toLocaleString()) : '-'}
+                          {stockAskVol != null ? (stockAskVol === 0 ? '0 (無賣單)' : Number(stockAskVol).toLocaleString()) : '-'}
                         </td>
 
                         {/* 9. 套利價差 (元) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
@@ -1063,7 +1109,12 @@ export default function App() {
                           {profitVal != null ? profitVal.toLocaleString() : '-'}
                         </td>
 
-                        {/* 11. 套利空間 (%) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        {/* 11. 總投入成本 (本金+費用) (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '600', color: isLowAskVol ? '#64748b' : (totalInvestmentVal != null ? '#cbd5e1' : '#64748b'), whiteSpace: 'nowrap' }}>
+                          {totalInvestmentVal != null ? totalInvestmentVal.toLocaleString() : '-'}
+                        </td>
+
+                        {/* 12. 套利空間 (%) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
                         <td style={{ padding: '4px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {marginVal != null ? (
                             <span style={{
