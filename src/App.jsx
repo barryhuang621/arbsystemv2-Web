@@ -22,6 +22,7 @@ export default function App() {
   const [showNasLog, setShowNasLog] = useState(false); // 控制中繼伺服器 Console 是否顯示報價明細
   const [recordNasLog, setRecordNasLog] = useState(false); // 控制中繼伺服器 是否寫入 JSONL 報價紀錄檔 (預設 false)
   const [onlyPositiveProfit, setOnlyPositiveProfit] = useState(false); // 只顯示正利潤標的 (預設 false)
+  const [activeTab, setActiveTab] = useState('short'); // 'short' (期賣套利: 買現貨+賣期貨) | 'long' (期買套利: 賣現貨+買期貨)
 
   // 計算期貨 5 碼合約代碼後綴 (第4碼月份字母 A~L + 第5碼年份個位數，支援跨年度)
   const getContractSuffix = (type = contractMonthType) => {
@@ -96,7 +97,7 @@ export default function App() {
               disconnectWebSocket();
             }
           } else if (data.type === 'quote_update') {
-            // 2.1 高頻局部更新：收到報價與利潤更新時，透過 React State 的 function update 進行 O(1) 尋找與覆寫
+            // 2.1 高頻局部更新：收到報價與雙向套利試算時，透過 React State 進行 O(1) 尋找與覆寫
             setTargetsList(prevList => {
               const newList = [...prevList];
               const idx = newList.findIndex(item => item.StockCode === data.StockCode);
@@ -105,12 +106,25 @@ export default function App() {
                   ...newList[idx],
                   stockAskPrice: data.stockAskPrice !== undefined ? data.stockAskPrice : newList[idx].stockAskPrice,
                   stockAskVol: data.stockAskVol !== undefined ? data.stockAskVol : newList[idx].stockAskVol,
+                  stockBidPrice: data.stockBidPrice !== undefined ? data.stockBidPrice : newList[idx].stockBidPrice,
+                  stockBidVol: data.stockBidVol !== undefined ? data.stockBidVol : newList[idx].stockBidVol,
+
                   futBidPrice: data.futBidPrice !== undefined ? data.futBidPrice : newList[idx].futBidPrice,
                   futBidVol: data.futBidVol !== undefined ? data.futBidVol : newList[idx].futBidVol,
-                  spreadVal: data.spreadValue !== undefined ? data.spreadValue : newList[idx].spreadVal,
-                  profitVal: data.profitAmount !== undefined ? data.profitAmount : newList[idx].profitVal,
-                  totalInvestmentVal: data.totalInvestment !== undefined ? data.totalInvestment : newList[idx].totalInvestmentVal,
-                  marginVal: data.profitMargin !== undefined ? data.profitMargin : newList[idx].marginVal,
+                  futAskPrice: data.futAskPrice !== undefined ? data.futAskPrice : newList[idx].futAskPrice,
+                  futAskVol: data.futAskVol !== undefined ? data.futAskVol : newList[idx].futAskVol,
+
+                  // 期賣套利數據 (Short)
+                  short_spread: data.short_spread !== undefined ? data.short_spread : (data.spreadValue !== undefined ? data.spreadValue : newList[idx].short_spread),
+                  short_profit: data.short_profit !== undefined ? data.short_profit : (data.profitAmount !== undefined ? data.profitAmount : newList[idx].short_profit),
+                  short_total_investment: data.short_total_investment !== undefined ? data.short_total_investment : (data.totalInvestment !== undefined ? data.totalInvestment : newList[idx].short_total_investment),
+                  short_margin: data.short_margin !== undefined ? data.short_margin : (data.profitMargin !== undefined ? data.profitMargin : newList[idx].short_margin),
+
+                  // 期買套利數據 (Long)
+                  long_spread: data.long_spread !== undefined ? data.long_spread : newList[idx].long_spread,
+                  long_profit: data.long_profit !== undefined ? data.long_profit : newList[idx].long_profit,
+                  long_total_investment: data.long_total_investment !== undefined ? data.long_total_investment : newList[idx].long_total_investment,
+                  long_margin: data.long_margin !== undefined ? data.long_margin : newList[idx].long_margin,
                 };
               }
               return newList;
@@ -359,7 +373,9 @@ export default function App() {
     }
 
     if (onlyPositiveProfit) {
-      const profit = item.profitVal !== undefined ? item.profitVal : (item.estimatedProfit !== undefined ? item.estimatedProfit : null);
+      const profit = activeTab === 'short'
+        ? (item.short_profit !== undefined ? item.short_profit : item.profitVal)
+        : (item.long_profit !== undefined ? item.long_profit : item.profitVal);
       if (profit == null || profit <= 0) return false;
     }
 
@@ -825,77 +841,6 @@ export default function App() {
                     width: '160px'
                   }}
                 />
-                <button
-                  onClick={handleGetStockFuturesTargets}
-                  disabled={isLoadingTargets}
-                  style={{
-                    padding: '3px 10px',
-                    backgroundColor: '#0284c7',
-                    color: '#ffffff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    fontWeight: '600',
-                    fontSize: '0.8rem',
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                    opacity: isLoadingTargets ? 0.6 : 1
-                  }}
-                >
-                  {isLoadingTargets ? '⏳ 載入中...' : '🔄 刷新標的'}
-                </button>
-
-                {/* 當月 / 次月 Radio 按鈕選項 */}
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  marginLeft: '4px',
-                  paddingLeft: '8px',
-                  borderLeft: '1px solid #334155'
-                }}>
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '3px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem',
-                    fontWeight: '600',
-                    color: contractMonthType === 'current' ? '#38bdf8' : '#94a3b8',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    <input
-                      type="radio"
-                      name="contractMonthType"
-                      value="current"
-                      checked={contractMonthType === 'current'}
-                      onChange={() => setContractMonthType('current')}
-                      style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
-                    />
-                    當月 ({getContractSuffix('current')})
-                  </label>
-
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '3px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem',
-                    fontWeight: '600',
-                    color: contractMonthType === 'next' ? '#38bdf8' : '#94a3b8',
-                    whiteSpace: 'nowrap'
-                  }}>
-                    <input
-                      type="radio"
-                      name="contractMonthType"
-                      value="next"
-                      checked={contractMonthType === 'next'}
-                      onChange={() => setContractMonthType('next')}
-                      style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
-                    />
-                    次月 ({getContractSuffix('next')})
-                  </label>
-                </div>
-
                 {/* 🔥 只顯示正利潤 Checkbox */}
                 <div style={{
                   display: 'flex',
@@ -927,6 +872,49 @@ export default function App() {
                     />
                     🔥 只顯示正利潤
                   </label>
+                </div>
+
+                {/* 🎯 策略 Tab 切換紐 (期賣套利 / 期買套利) */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  marginLeft: '4px',
+                  paddingLeft: '8px',
+                  borderLeft: '1px solid #334155',
+                  gap: '4px'
+                }}>
+                  <button
+                    onClick={() => setActiveTab('short')}
+                    style={{
+                      padding: '2px 10px',
+                      borderRadius: '4px',
+                      fontSize: '0.8rem',
+                      fontWeight: '700',
+                      border: `1px solid ${activeTab === 'short' ? '#0284c7' : '#334155'}`,
+                      cursor: 'pointer',
+                      backgroundColor: activeTab === 'short' ? '#0284c7' : 'rgba(15, 23, 42, 0.6)',
+                      color: activeTab === 'short' ? '#ffffff' : '#94a3b8',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    📉 期賣套利 (買現貨+賣期貨)
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('long')}
+                    style={{
+                      padding: '2px 10px',
+                      borderRadius: '4px',
+                      fontSize: '0.8rem',
+                      fontWeight: '700',
+                      border: `1px solid ${activeTab === 'long' ? '#6366f1' : '#334155'}`,
+                      cursor: 'pointer',
+                      backgroundColor: activeTab === 'long' ? '#6366f1' : 'rgba(15, 23, 42, 0.6)',
+                      color: activeTab === 'long' ? '#ffffff' : '#94a3b8',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    📈 期買套利 (賣現貨+買期貨)
+                  </button>
                 </div>
               </div>
             </div>
@@ -969,15 +957,23 @@ export default function App() {
                   borderBottom: '2px solid #334155',
                   zIndex: 10
                 }}>
-                  <tr>
+                  <tr style={{ backgroundColor: activeTab === 'short' ? 'rgba(2, 132, 199, 0.08)' : 'rgba(99, 102, 241, 0.08)' }}>
                     <th style={{ padding: '6px 8px', textAlign: 'left', color: '#94a3b8', fontWeight: '700' }}>1. 股票標的</th>
                     <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>2. 現貨代號</th>
                     <th style={{ padding: '6px 8px', textAlign: 'left', color: '#94a3b8', fontWeight: '700' }}>3. 期貨標的/規格</th>
                     <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>4. 期貨代號</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>5. 期貨買量 (BidVol)</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>6. 期貨買價 (Bid1)</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>7. 股票賣價 (Ask1)</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>8. 股票賣量 (AskVol)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>
+                      {activeTab === 'short' ? '5. 期貨買量 (BidVol)' : '5. 股票買量 (BidVol)'}
+                    </th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>
+                      {activeTab === 'short' ? '6. 期貨買價 (Bid1)' : '6. 股票買價 (Bid1)'}
+                    </th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>
+                      {activeTab === 'short' ? '7. 股票賣價 (Ask1)' : '7. 期貨賣價 (Ask1)'}
+                    </th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>
+                      {activeTab === 'short' ? '8. 股票賣量 (AskVol)' : '8. 期貨賣量 (AskVol)'}
+                    </th>
                     <th style={{ padding: '6px 8px', textAlign: 'right', color: '#f59e0b', fontWeight: '700' }}>9. 套利價差 (元)</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right', color: '#ef4444', fontWeight: '700' }}>10. 預估利潤 (金額)</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>11. 總投入成本 (本金+費用)</th>
@@ -987,33 +983,47 @@ export default function App() {
                 </thead>
                 <tbody>
                   {filteredTargets.map((row, idx) => {
-                    const stockAskPrice = row.stockAskPrice != null ? row.stockAskPrice : (row.lastPrice != null ? row.lastPrice : row.closePrice);
-                    const stockAskVol = row.stockAskVol != null ? row.stockAskVol : null;
-                    const futBidPrice = row.futBidPrice != null ? row.futBidPrice : null;
-                    const futBidVol = row.futBidVol != null ? row.futBidVol : null;
+                    // 根據 activeTab 動態取用期賣 (short) 或 期買 (long) 欄位數值
+                    const col5Vol = activeTab === 'short' ? row.futBidVol : row.stockBidVol;
+                    const col6Price = activeTab === 'short' ? row.futBidPrice : row.stockBidPrice;
+                    const col7Price = activeTab === 'short' ? row.stockAskPrice : row.futAskPrice;
+                    const col8Vol = activeTab === 'short' ? row.stockAskVol : row.futAskVol;
 
-                    // 判斷現貨賣單數量是否不足 2 張 (對沖 1 口期貨需要 2 張股票，若 AskVol < 2 或是無賣單則以灰階顯示)
-                    const isLowAskVol = stockAskVol == null || Number(stockAskVol) < 2;
+                    // 判斷現貨量是否不足 2 張 (期賣需股票賣單 >= 2, 期買需股票買單 >= 2)
+                    const isLowVolume = activeTab === 'short'
+                      ? (row.stockAskVol == null || Number(row.stockAskVol) < 2)
+                      : (row.stockBidVol == null || Number(row.stockBidVol) < 2);
 
                     // 計算股票期貨完整代號
                     const rootContract = (row.Contract || '').trim();
                     const futSymbol5 = rootContract ? `${rootContract}${getContractSuffix(contractMonthType)}` : '';
 
-                    const hasSpread = futBidPrice != null && stockAskPrice != null;
-                    const spreadVal = row.spreadVal !== undefined ? row.spreadVal : (hasSpread ? (futBidPrice - stockAskPrice) : null);
-                    const profitVal = row.profitVal !== undefined ? row.profitVal : (row.estimatedProfit !== undefined ? row.estimatedProfit : null);
-                    const totalInvestmentVal = row.totalInvestmentVal !== undefined ? row.totalInvestmentVal : (stockAskPrice != null ? Math.round(stockAskPrice * 2000) : null);
-                    const marginVal = row.marginVal !== undefined ? row.marginVal : (row.marginPercent !== undefined ? row.marginPercent : (hasSpread && stockAskPrice > 0 ? ((futBidPrice - stockAskPrice) / stockAskPrice * 100) : null));
+                    // 價差與利潤數值取用
+                    const spreadVal = activeTab === 'short'
+                      ? (row.short_spread !== undefined ? row.short_spread : row.spreadVal)
+                      : (row.long_spread !== undefined ? row.long_spread : (col6Price != null && col7Price != null ? (col6Price - col7Price) : null));
 
-                    // 價差與利潤顏色：正數紅、負數綠 (台灣台股慣用)；當賣單 < 2 張時以灰階顯示
-                    const spreadColor = isLowAskVol ? '#64748b' : (spreadVal != null ? (spreadVal >= 0 ? '#ef4444' : '#10b981') : '#64748b');
-                    const profitColor = isLowAskVol ? '#64748b' : (profitVal != null ? (profitVal >= 0 ? '#ef4444' : '#10b981') : '#64748b');
+                    const profitVal = activeTab === 'short'
+                      ? (row.short_profit !== undefined ? row.short_profit : row.profitVal)
+                      : (row.long_profit !== undefined ? row.long_profit : null);
+
+                    const totalInvestmentVal = activeTab === 'short'
+                      ? (row.short_total_investment !== undefined ? row.short_total_investment : row.totalInvestmentVal)
+                      : (row.long_total_investment !== undefined ? row.long_total_investment : (col7Price != null ? Math.round(col7Price * 2000) : null));
+
+                    const marginVal = activeTab === 'short'
+                      ? (row.short_margin !== undefined ? row.short_margin : row.marginVal)
+                      : (row.long_margin !== undefined ? row.long_margin : null);
+
+                    // 價差與利潤顏色：正數紅、負數綠 (台灣台股慣用)；當賣單/買單 < 2 張時以灰階顯示
+                    const spreadColor = isLowVolume ? '#64748b' : (spreadVal != null ? (spreadVal >= 0 ? '#ef4444' : '#10b981') : '#64748b');
+                    const profitColor = isLowVolume ? '#64748b' : (profitVal != null ? (profitVal >= 0 ? '#ef4444' : '#10b981') : '#64748b');
 
                     // 套利空間 (%) 徽章顏色
                     let marginBg = 'rgba(100, 116, 139, 0.15)';
                     let marginBorder = '#475569';
                     let marginColor = '#94a3b8';
-                    if (!isLowAskVol && marginVal != null) {
+                    if (!isLowVolume && marginVal != null) {
                       if (marginVal >= 0) {
                         marginBg = 'rgba(239, 68, 68, 0.15)';
                         marginBorder = '#ef4444';
@@ -1031,7 +1041,7 @@ export default function App() {
                         style={{
                           borderBottom: '1px solid #1e293b',
                           backgroundColor: idx % 2 === 0 ? 'rgba(15, 23, 42, 0.35)' : 'transparent',
-                          opacity: isLowAskVol ? 0.75 : 1,
+                          opacity: isLowVolume ? 0.75 : 1,
                           transition: 'background-color 0.1s ease'
                         }}
                         onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(51, 65, 85, 0.45)'}
@@ -1079,42 +1089,42 @@ export default function App() {
                           </span>
                         </td>
 
-                        {/* 5. 期貨買量 (BidVol) (右對齊) */}
-                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: futBidVol != null ? '#cbd5e1' : '#64748b', whiteSpace: 'nowrap' }}>
-                          {futBidVol != null ? futBidVol.toLocaleString() : '-'}
+                        {/* 5. Col 5 買量 (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: col5Vol != null ? '#cbd5e1' : '#64748b', whiteSpace: 'nowrap' }}>
+                          {col5Vol != null ? col5Vol.toLocaleString() : '-'}
                         </td>
 
-                        {/* 6. 期貨買價 (Bid1) (右對齊) */}
-                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: futBidPrice != null ? '#38bdf8' : '#64748b', whiteSpace: 'nowrap' }}>
-                          {futBidPrice != null ? futBidPrice.toFixed(2) : '-'}
+                        {/* 6. Col 6 買價 (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: col6Price != null ? '#38bdf8' : '#64748b', whiteSpace: 'nowrap' }}>
+                          {col6Price != null ? Number(col6Price).toFixed(2) : '-'}
                         </td>
 
-                        {/* 7. 股票賣價 (Ask1) (右對齊) */}
-                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '600', color: stockAskPrice != null ? '#38bdf8' : '#64748b', whiteSpace: 'nowrap' }}>
-                          {stockAskPrice != null ? Number(stockAskPrice).toFixed(2) : '-'}
+                        {/* 7. Col 7 賣價 (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '600', color: col7Price != null ? '#38bdf8' : '#64748b', whiteSpace: 'nowrap' }}>
+                          {col7Price != null ? Number(col7Price).toFixed(2) : '-'}
                         </td>
 
-                        {/* 8. 股票賣量 (AskVol) (右對齊，無賣單或小於 2 張呈灰階) */}
-                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: isLowAskVol ? '#64748b' : '#cbd5e1', fontWeight: isLowAskVol ? '400' : '600', whiteSpace: 'nowrap' }}>
-                          {stockAskVol != null ? (stockAskVol === 0 ? '0 (無賣單)' : Number(stockAskVol).toLocaleString()) : '-'}
+                        {/* 8. Col 8 賣量 (右對齊，數量<2張呈灰階) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: isLowVolume ? '#64748b' : '#cbd5e1', fontWeight: isLowVolume ? '400' : '600', whiteSpace: 'nowrap' }}>
+                          {col8Vol != null ? (col8Vol === 0 ? (activeTab === 'short' ? '0 (無賣單)' : '0 (無期貨單)') : Number(col8Vol).toLocaleString()) : '-'}
                         </td>
 
-                        {/* 9. 套利價差 (元) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        {/* 9. 套利價差 (元) (右對齊 - 正數紅/負數綠，量<2灰階) */}
                         <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '800', color: spreadColor, whiteSpace: 'nowrap' }}>
                           {spreadVal != null ? (spreadVal >= 0 ? `+${spreadVal.toFixed(2)}` : spreadVal.toFixed(2)) : '-'}
                         </td>
 
-                        {/* 10. 預估利潤 (金額) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        {/* 10. 預估利潤 (金額) (右對齊 - 正數紅/負數綠，量<2灰階) */}
                         <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '700', color: profitColor, whiteSpace: 'nowrap' }}>
                           {profitVal != null ? profitVal.toLocaleString() : '-'}
                         </td>
 
                         {/* 11. 總投入成本 (本金+費用) (右對齊) */}
-                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '600', color: isLowAskVol ? '#64748b' : (totalInvestmentVal != null ? '#cbd5e1' : '#64748b'), whiteSpace: 'nowrap' }}>
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '600', color: isLowVolume ? '#64748b' : (totalInvestmentVal != null ? '#cbd5e1' : '#64748b'), whiteSpace: 'nowrap' }}>
                           {totalInvestmentVal != null ? totalInvestmentVal.toLocaleString() : '-'}
                         </td>
 
-                        {/* 12. 套利空間 (%) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        {/* 12. 套利空間 (%) (右對齊 - 正數紅/負數綠，量<2灰階) */}
                         <td style={{ padding: '4px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {marginVal != null ? (
                             <span style={{
@@ -1134,34 +1144,26 @@ export default function App() {
                           )}
                         </td>
 
-                        {/* 12. 快速操作 (置中) */}
-                        <td style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                        {/* 13. 快速操作 (置中) */}
+                        <td style={{ padding: "4px 8px", textAlign: "center", whiteSpace: "nowrap" }}>
                           <button
                             onClick={() => {
-                              if (isLowAskVol) {
-                                alert(`⚠️ 標的 ${row.StockCode} (${row.StockName}) 現貨賣單不足 2 張 (目前: ${stockAskVol ?? 0} 張)！無法滿足 1 口期貨所需 2 張對沖數量。`);
+                              if (isLowVolume) {
+                                alert(`⚠️ 標的 ${row.StockCode} (${row.StockName}) ${activeTab === "short" ? "現貨賣單" : "現貨買單"}不足 2 張！無法滿足 1 口期貨對沖數量。`);
                               } else {
-                                alert(`發動標的 ${row.StockCode} (${row.StockName}) 套利單`);
+                                alert(`發動標的 ${row.StockCode} (${row.StockName}) ${activeTab === "short" ? "期賣套利單 (買現貨+賣期貨)" : "期買套利單 (賣現貨+買期貨)"}`);
                               }
                             }}
                             style={{
-                              backgroundColor: isLowAskVol ? 'rgba(100, 116, 139, 0.2)' : 'rgba(2, 132, 199, 0.2)',
-                              border: `1px solid ${isLowAskVol ? '#475569' : '#0284c7'}`,
-                              color: isLowAskVol ? '#94a3b8' : '#38bdf8',
-                              padding: '2px 8px',
-                              borderRadius: '4px',
-                              fontSize: '0.78rem',
-                              fontWeight: '600',
-                              cursor: 'pointer',
-                              transition: 'all 0.15s ease'
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = '#0284c7';
-                              e.currentTarget.style.color = '#ffffff';
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = 'rgba(2, 132, 199, 0.2)';
-                              e.currentTarget.style.color = '#38bdf8';
+                              backgroundColor: isLowVolume ? "rgba(100, 116, 139, 0.2)" : (activeTab === "short" ? "rgba(2, 132, 199, 0.2)" : "rgba(99, 102, 241, 0.2)"),
+                              border: `1px solid ${isLowVolume ? "#475569" : (activeTab === "short" ? "#0284c7" : "#6366f1")}`,
+                              color: isLowVolume ? "#94a3b8" : (activeTab === "short" ? "#38bdf8" : "#818cf8"),
+                              padding: "2px 8px",
+                              borderRadius: "4px",
+                              fontSize: "0.78rem",
+                              fontWeight: "600",
+                              cursor: "pointer",
+                              transition: "all 0.15s ease"
                             }}
                           >
                             ⚡ 下單
