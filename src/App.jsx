@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 export default function App() {
   const [nasHost, setNasHost] = useState('192.168.0.113:8000');
@@ -15,7 +15,35 @@ export default function App() {
   const [futuresFee, setFuturesFee] = useState('18');           // 期貨交易手續費 (元)
   const [minStockPrice, setMinStockPrice] = useState('90');     // 最小股價
   const [maxStockPrice, setMaxStockPrice] = useState('150');    // 最大股價
-  const [quoteMarket, setQuoteMarket] = useState('TSE');        // 市場別快照: TSE 上市; OTC 上櫃; ESB 興櫃; TIB 創新板; PSB 戰略板
+  const [targetsList, setTargetsList] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isLoadingTargets, setIsLoadingTargets] = useState(false);
+  const [contractMonthType, setContractMonthType] = useState('current'); // 'current' (當月) | 'next' (次月)
+  const [showNasLog, setShowNasLog] = useState(false); // 控制中繼伺服器 Console 是否顯示報價明細
+  const [recordNasLog, setRecordNasLog] = useState(false); // 控制中繼伺服器 是否寫入 JSONL 報價紀錄檔 (預設 false)
+
+  // 計算期貨 5 碼合約代碼後綴 (第4碼月份字母 A~L + 第5碼年份個位數，支援跨年度)
+  const getContractSuffix = (type = contractMonthType) => {
+    const monthLetters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+    const now = new Date();
+    let year = now.getFullYear();
+    let month = now.getMonth() + 1; // 1 ~ 12
+
+    if (type === 'next') {
+      if (month === 12) {
+        month = 1;
+        year += 1; // 跨年度自動加 1 (例如：12月次月為隔年1月)
+      } else {
+        month += 1;
+      }
+    }
+
+    const letter = monthLetters[month - 1];
+    const yearDigit = String(year).slice(-1);
+    return `${letter}${yearDigit}`;
+  };
+
+  const wsRef = useRef(null);
 
   // 取得完整的 API Base URL
   const getApiBaseUrl = () => {
@@ -25,6 +53,103 @@ export default function App() {
       ? cleanHost
       : `http://${cleanHost}`;
   };
+
+  // 斷開 Web UI 與 NAS 中繼站的 WebSocket (WSS) 通道
+  const disconnectWebSocket = () => {
+    if (wsRef.current) {
+      console.log('🔌 關閉 Web UI 與 NAS 中繼站的 WebSocket 連線通道');
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+  };
+
+  // 建立 Web UI 與 NAS 中繼站的即時 WebSocket (WSS) 通道 (按下【連線】按鈕時呼叫)
+  const connectWebSocket = () => {
+    disconnectWebSocket();
+    const cleanHost = nasHost.trim();
+    if (!cleanHost) return;
+
+    const hostOnly = cleanHost.replace(/^https?:\/\//, '');
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${hostOnly}/ws/fubon`;
+
+    console.log(`[Web UI] 按下連線，正在建立與 NAS 中繼站的即時 WebSocket 通道: ${wsUrl}`);
+
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('%c🟢 已成功建立 NAS 即時 WebSocket 事件通道！', 'color: #4ade80; font-weight: bold;');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'status') {
+            console.log('⚡ 收到 NAS 即時 WebSocket 狀態更新:', data);
+            const connectedState = !!data.is_connected;
+            setIsQuoteConnected(connectedState);
+            if (!connectedState) {
+              disconnectWebSocket();
+            }
+          } else if (data.type === 'quote_update') {
+            // 2.1 高頻局部更新：收到報價與利潤更新時，透過 React State 的 function update 進行 O(1) 尋找與覆寫
+            setTargetsList(prevList => {
+              const newList = [...prevList];
+              const idx = newList.findIndex(item => item.StockCode === data.StockCode);
+              if (idx !== -1) {
+                newList[idx] = {
+                  ...newList[idx],
+                  stockAskPrice: data.stockAskPrice !== undefined ? data.stockAskPrice : newList[idx].stockAskPrice,
+                  stockAskVol: data.stockAskVol !== undefined ? data.stockAskVol : newList[idx].stockAskVol,
+                  futBidPrice: data.futBidPrice !== undefined ? data.futBidPrice : newList[idx].futBidPrice,
+                  futBidVol: data.futBidVol !== undefined ? data.futBidVol : newList[idx].futBidVol,
+                  spreadVal: data.spreadValue !== undefined ? data.spreadValue : newList[idx].spreadVal,
+                  estimatedProfit: data.profitAmount !== undefined ? data.profitAmount : newList[idx].estimatedProfit,
+                  marginPercent: data.profitMargin !== undefined ? data.profitMargin : newList[idx].marginPercent,
+                };
+              }
+              return newList;
+            });
+          } else if (data.type === 'system_event') {
+            // 2.2 將中繼站回傳的訂閱/取消成功等訊息直接印至 Chrome Console
+            console.log(`[NAS 訂閱系統回報] ${data.event === 'subscribed' ? '✅ 訂閱成功' : (data.event === 'unsubscribed' ? '☑️ 取消訂閱成功' : 'ℹ️ 系統事件')}:`, data);
+          }
+        } catch (err) {
+          console.error('解析 WebSocket 訊息失敗:', err);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.warn('⚠️ NAS WebSocket 連線發生錯誤:', err);
+        setIsQuoteConnected(false);
+        disconnectWebSocket();
+      };
+
+      ws.onclose = () => {
+        console.log('🔌 NAS WebSocket 通道已關閉');
+        setIsQuoteConnected(false);
+      };
+    } catch (err) {
+      console.error('建立 WebSocket 通道失敗:', err);
+      setIsQuoteConnected(false);
+    }
+  };
+
+  // 組件卸載與瀏覽器分頁關閉時安全關閉 WebSocket
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      disconnectWebSocket();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      disconnectWebSocket();
+    };
+  }, []);
 
   // 1. 確認連線狀態 (GET /api/v1/fubon/verify)
   const handleVerifyConnection = async () => {
@@ -43,31 +168,54 @@ export default function App() {
   // 2. 連線 / 中斷報價系統 (connect / disconnect)
   const handleConnectQuote = async () => {
     const baseUrl = getApiBaseUrl();
-    const endpoint = isQuoteConnected ? '/api/v1/fubon/disconnect' : '/api/v1/fubon/connect';
 
-    try {
-      const res = await fetch(`${baseUrl}${endpoint}`, {
-        method: 'POST'
-      });
-      const data = await res.json();
-      setApiResponse(data);
-
-      if (isQuoteConnected) {
-        // 中斷連線
+    if (isQuoteConnected) {
+      // 點擊【斷線】：同時中斷 NAS -> 富邦，與 Web UI -> NAS WSS
+      try {
+        const res = await fetch(`${baseUrl}/api/v1/fubon/disconnect`, { method: 'POST' });
+        const data = await res.json();
+        setApiResponse(data);
+        disconnectWebSocket();
         setIsQuoteConnected(false);
         alert(`中斷連線成功！(目標: ${baseUrl})\n${data.message || ''}`);
-      } else {
-        // 建立連線
+      } catch (err) {
+        console.error('與 NAS 中斷連線通訊失敗:', err);
+        disconnectWebSocket();
+        setIsQuoteConnected(false);
+      }
+    } else {
+      // 點擊【連線】：同時觸發 NAS -> 登入富邦，與 Web UI -> NAS 建立 WSS
+      try {
+        // 清空表格中的舊資料
+        setTargetsList([]);
+        // 1. 將 UI 介面上的交易參數打包，送交 NAS 保存以便後續計算真實淨利潤
+        const costParams = {
+          stockFeeRate: parseFloat(stockFeeRate),
+          brokerDiscount: parseFloat(brokerDiscount),
+          stockTaxRate: parseFloat(stockTaxRate),
+          futuresFee: parseFloat(futuresFee),
+          futuresTaxRate: 0.00002 // 預設期交稅率
+        };
+
+        const res = await fetch(`${baseUrl}/api/v1/fubon/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cost_params: costParams })
+        });
+        const data = await res.json();
+        setApiResponse(data);
+
         if (data.status === 'success' || data.is_connected) {
           setIsQuoteConnected(true);
+          connectWebSocket(); // 建立 Web UI 與中繼站間的 WSS
           alert(`連線成功！(目標: ${baseUrl})\n${data.message || ''}`);
         } else {
           alert(`連線失敗: ${data.detail || JSON.stringify(data)}`);
         }
+      } catch (err) {
+        console.error('與 NAS 通訊失敗:', err);
+        alert(`與 NAS 通訊失敗 (${baseUrl})，請確認 NAS 服務與 IP:Port 是否正確`);
       }
-    } catch (err) {
-      console.error('與 NAS 通訊失敗:', err);
-      alert(`與 NAS 通訊失敗 (${baseUrl})，請確認 NAS 服務與 IP:Port 是否正確`);
     }
   };
 
@@ -129,14 +277,16 @@ export default function App() {
     }
   };
 
-  // 5. 富邦 API 股票行情快照 (snapshot/quotes/{market}) 查詢
-  const handleSnapshotQuotesConfirm = async () => {
-    const market = quoteMarket.trim().toUpperCase() || 'TSE';
+  // 5. 取得股票期貨標的 (透過 SSFLists ✕ 股票行情快照 進行交叉比對與價格區間過濾)
+  const handleGetStockFuturesTargets = async () => {
+    const minP = parseFloat(minStockPrice) || 0;
+    const maxP = parseFloat(maxStockPrice) || 999999;
     const baseUrl = getApiBaseUrl();
-    console.log(`[Web UI] 向 NAS 中繼站發送股票市場行情快照 (snapshot/quotes/${market}) 指令`);
+    console.log(`[Web UI] 向 NAS 中繼站發送【取得股票期貨標的】指令，價格區間: ${minP} <= 股價 <= ${maxP}`);
+    setIsLoadingTargets(true);
 
     try {
-      const res = await fetch(`${baseUrl}/api/v1/fubon/snapshot/quotes/${encodeURIComponent(market)}`);
+      const res = await fetch(`${baseUrl}/api/v1/fubon/stock-futures-targets?min_price=${minP}&max_price=${maxP}`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `HTTP Error ${res.status}`);
@@ -144,34 +294,129 @@ export default function App() {
       const data = await res.json();
       setApiResponse(data);
 
+      const list = data.data || [];
+      setTargetsList(list);
+
       console.log('%c==================================================', 'color: #38bdf8; font-weight: bold;');
-      console.log(`%c⚡ 富邦股票市場行情快照 (Snapshot Quotes) 成功取得！`, 'color: #4ade80; font-size: 1.1rem; font-weight: bold;');
-      console.log(`📌 市場別 (market): ${market}`);
+      console.log(`%c🎯 股票期貨標的篩選成功！(價格區間: ${minP} ~ ${maxP} 元)`, 'color: #4ade80; font-size: 1.1rem; font-weight: bold;');
+      console.log(`📊 符合條件標的總筆數: ${list.length} 筆`);
       console.log(`🌐 NAS 中繼站: ${baseUrl}`);
-      console.log('📦 完整行情快照 JSON 資料如下:');
-      console.dir(data);
+      console.log('📦 詳細標的清單內容如下:');
+      console.dir(data.data || data);
       console.log('%c==================================================', 'color: #38bdf8; font-weight: bold;');
 
-      alert(`已成功取得 [${market}] 市場行情快照資料！\n\n詳細內容已完整列印在 Chrome Console 視窗中 (請按 F12 查看)`);
+      alert(`已成功取得股票期貨標的 (共 ${data.count || 0} 筆符合價位區間 ${minP}~${maxP} 元)！\n\n完整標的列表已詳細列印在 Chrome Console 視窗中 (請按 F12 查看)`);
     } catch (err) {
-      console.error('❌ 取得市場行情快照失敗:', err);
-      alert(`取得市場行情快照失敗: ${err.message}`);
+      console.error('❌ 取得股票期貨標的失敗:', err);
+      alert(`取得股票期貨標的失敗: ${err.message}`);
     }
   };
 
+  // 切換中繼伺服器 Log 紀錄開關 (寫入 JSONL 檔)
+  const handleToggleRecordNasLog = async (newValue) => {
+    setRecordNasLog(newValue);
+    const baseUrl = getApiBaseUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/fubon/set-log-record`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newValue })
+      });
+      const data = await res.json();
+      console.log(`💾 中繼 Log 紀錄已${newValue ? '開啟' : '關閉'}:`, data);
+    } catch (err) {
+      console.error('❗ 切換中繼 Log 紀錄失敗:', err);
+    }
+  };
+
+  // 切換中繼伺服器 Log 顯示開關 (Console 印出)
+  const handleToggleNasLog = async (newValue) => {
+    setShowNasLog(newValue);
+    const baseUrl = getApiBaseUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/fubon/set-log-display`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newValue })
+      });
+      const data = await res.json();
+      console.log(`🖥️ 中繼 Log 顯示已${newValue ? '開啟' : '關閉'}:`, data);
+    } catch (err) {
+      console.error('❗ 切換中繼 Log 顯示失敗:', err);
+    }
+  };
+  // 篩選搜尋關鍵字 (移至最前以供訂閱功能使用)
+  const filteredTargets = (targetsList || []).filter((item) => {
+    if (!searchTerm || !searchTerm.trim()) return true;
+    const term = searchTerm.trim().toLowerCase();
+    const code = (item.StockCode || '').toLowerCase();
+    const name = (item.StockName || '').toLowerCase();
+    const contract = (item.Contract || '').toLowerCase();
+    return code.includes(term) || name.includes(term) || contract.includes(term);
+  });
+  // 1.2 發送訂閱股票 REST API 指令
+  const handleSubscribeStocks = async () => {
+    if (!filteredTargets || filteredTargets.length === 0) return;
+    const stockCodes = [...new Set(filteredTargets.map(item => item.StockCode))].filter(Boolean);
+    const baseUrl = getApiBaseUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/fubon/subscribe-stocks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols: stockCodes })
+      });
+      const data = await res.json();
+      console.log('📈 訂閱股票指令已發送:', data);
+    } catch (err) {
+      console.error('📈 訂閱股票失敗:', err);
+      alert(`訂閱股票失敗: ${err.message}`);
+    }
+  };
+
+  // 1.2 發送訂閱期貨 REST API 指令
+  const handleSubscribeFutures = async () => {
+    if (!filteredTargets || filteredTargets.length === 0) return;
+
+    // 建立配對表供中繼站計算套利使用
+    const pairs = filteredTargets.map(item => {
+      const rootContract = (item.Contract || '').trim();
+      const futSymbol5 = rootContract ? `${rootContract}${getContractSuffix(contractMonthType)}` : '';
+      return { stock: item.StockCode, fut: futSymbol5 };
+    }).filter(p => p.fut !== '');
+
+    const futSymbols = [...new Set(pairs.map(p => p.fut))];
+    const baseUrl = getApiBaseUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/fubon/subscribe-futures`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols: futSymbols, pairs: pairs })
+      });
+      const data = await res.json();
+      console.log('📊 訂閱期貨指令已發送:', data);
+    } catch (err) {
+      console.error('📊 訂閱期貨失敗:', err);
+      alert(`訂閱期貨失敗: ${err.message}`);
+    }
+  };
+
+
   return (
     <div style={{
-      minHeight: '100vh',
+      height: '100vh',
+      maxHeight: '100vh',
+      overflow: 'hidden',
       backgroundColor: '#0b0f19',
       color: '#f8fafc',
       fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
       display: 'flex',
       flexDirection: 'column'
     }}>
-      {/* 頁首標題列 */}
+      {/* 頁首標題列 (固定頂部不捲動) */}
       <header className="glass-panel" style={{
-        margin: '16px',
-        padding: '12px 24px',
+        flexShrink: 0,
+        margin: '12px 16px 8px 16px',
+        padding: '8px 20px',
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
@@ -356,8 +601,65 @@ export default function App() {
           </div>
         </div>
 
-        {/* 最右側：NAS IP:Port 輸入框與連線報價系統按鈕 */}
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {/* 最右側：中繼Log紀錄/顯示開關 + NAS 位址、連線狀態獨立顯示區域、動態動作按鈕 (連線 / 斷線) */}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* 1. 中繼伺服器 Log 紀錄 Checkbox */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            cursor: 'pointer',
+            backgroundColor: recordNasLog ? 'rgba(234, 179, 8, 0.15)' : 'rgba(15, 23, 42, 0.6)',
+            border: `1px solid ${recordNasLog ? '#eab308' : '#334155'}`,
+            borderRadius: '8px',
+            padding: '6px 12px',
+            transition: 'all 0.2s ease',
+            whiteSpace: 'nowrap'
+          }}>
+            <input
+              type="checkbox"
+              checked={recordNasLog}
+              onChange={(e) => handleToggleRecordNasLog(e.target.checked)}
+              style={{ accentColor: '#eab308', cursor: 'pointer', width: '14px', height: '14px' }}
+            />
+            <span style={{
+              fontSize: '0.8rem',
+              fontWeight: '600',
+              color: recordNasLog ? '#fde047' : '#94a3b8'
+            }}>
+              💾 紀錄中繼log
+            </span>
+          </label>
+
+          {/* 2. 中繼伺服器 Log 顯示 Checkbox */}
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            cursor: 'pointer',
+            backgroundColor: showNasLog ? 'rgba(34, 197, 94, 0.15)' : 'rgba(15, 23, 42, 0.6)',
+            border: `1px solid ${showNasLog ? '#22c55e' : '#334155'}`,
+            borderRadius: '8px',
+            padding: '6px 12px',
+            transition: 'all 0.2s ease',
+            whiteSpace: 'nowrap'
+          }}>
+            <input
+              type="checkbox"
+              checked={showNasLog}
+              onChange={(e) => handleToggleNasLog(e.target.checked)}
+              style={{ accentColor: '#22c55e', cursor: 'pointer', width: '14px', height: '14px' }}
+            />
+            <span style={{
+              fontSize: '0.8rem',
+              fontWeight: '600',
+              color: showNasLog ? '#4ade80' : '#94a3b8'
+            }}>
+              🖥️ 顯示中繼log
+            </span>
+          </label>
+
+          {/* NAS 位址輸入框 */}
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -374,9 +676,9 @@ export default function App() {
               type="text"
               value={nasHost}
               onChange={(e) => setNasHost(e.target.value)}
-              placeholder="localhost:8000"
+              placeholder="192.168.0.113:8000"
               style={{
-                width: '180px',
+                width: '160px',
                 backgroundColor: 'transparent',
                 border: 'none',
                 color: '#38bdf8',
@@ -388,33 +690,55 @@ export default function App() {
             />
           </div>
 
-          <button
-            onClick={handleConnectQuote}
-            style={{
-              padding: '10px 20px',
-              borderRadius: '8px',
-              fontWeight: '600',
-              fontSize: '0.9rem',
-              backgroundColor: isQuoteConnected ? '#16a34a' : '#0284c7',
-              color: '#ffffff',
-              border: 'none',
-              cursor: 'pointer',
-              boxShadow: isQuoteConnected ? '0 0 12px rgba(22, 163, 74, 0.4)' : '0 0 12px rgba(2, 132, 199, 0.4)',
-              transition: 'all 0.2s ease',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              whiteSpace: 'nowrap'
-            }}
-          >
+          {/* 連線狀態獨立顯示區域 */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            backgroundColor: isQuoteConnected ? 'rgba(22, 163, 74, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+            border: `1px solid ${isQuoteConnected ? '#16a34a' : '#ef4444'}`,
+            borderRadius: '8px',
+            padding: '6px 12px'
+          }}>
             <span style={{
               width: '8px',
               height: '8px',
               borderRadius: '50%',
-              backgroundColor: isQuoteConnected ? '#86efac' : '#e0f2fe',
+              backgroundColor: isQuoteConnected ? '#4ade80' : '#f87171',
+              boxShadow: isQuoteConnected ? '0 0 8px #4ade80' : '0 0 8px #f87171',
               display: 'inline-block'
             }}></span>
-            {isQuoteConnected ? '報價系統已連接' : '連接報價系統'}
+            <span style={{
+              fontSize: '0.85rem',
+              fontWeight: '700',
+              color: isQuoteConnected ? '#4ade80' : '#f87171',
+              whiteSpace: 'nowrap'
+            }}>
+              {isQuoteConnected ? '已連線' : '未連線'}
+            </span>
+          </div>
+
+          {/* 動作按鈕：現在是未連線就顯示「連線」，已連線就顯示「斷線」 */}
+          <button
+            onClick={handleConnectQuote}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              fontWeight: '700',
+              fontSize: '0.85rem',
+              backgroundColor: isQuoteConnected ? '#e11d48' : '#0284c7',
+              color: '#ffffff',
+              border: 'none',
+              cursor: 'pointer',
+              boxShadow: isQuoteConnected ? '0 0 12px rgba(225, 29, 72, 0.4)' : '0 0 12px rgba(2, 132, 199, 0.4)',
+              transition: 'all 0.2s ease',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {isQuoteConnected ? '❌ 斷線' : '🔌 連線'}
           </button>
         </div>
       </header>
@@ -422,23 +746,383 @@ export default function App() {
       {/* 主要區域：劃分為 左側主內容與右側 15% 測試區塊 */}
       <div style={{
         flex: 1,
+        minHeight: 0,
         display: 'flex',
         padding: '0 16px 16px 16px',
-        gap: '16px'
+        gap: '16px',
+        overflow: 'hidden'
       }}>
-        {/* 左側主區域 (約 85% 寬度) */}
+        {/* 左側主區域 (約 85% 寬度)：股票期貨套利監控看板 */}
         <main style={{
           flex: '1 1 85%',
-          background: 'rgba(15, 23, 42, 0.5)',
+          minHeight: 0,
+          height: '100%',
+          background: 'rgba(15, 23, 42, 0.7)',
+          backdropFilter: 'blur(12px)',
           borderRadius: '12px',
-          border: '1px dashed #334155',
+          border: '1px solid #334155',
           display: 'flex',
-          justify: 'center',
-          alignItems: 'center',
-          color: '#475569',
-          fontSize: '1.1rem'
+          flexDirection: 'column',
+          overflow: 'hidden'
         }}>
-          主交易系統內容區域
+          {/* 表格控制頂列 (完全鎖定凍結，不隨表格滾動) */}
+          <div style={{
+            flexShrink: 0,
+            padding: '6px 14px',
+            borderBottom: '1px solid #334155',
+            display: 'flex',
+            justify: 'space-between',
+            alignItems: 'center',
+            backgroundColor: 'rgba(30, 41, 59, 0.6)',
+            flexWrap: 'wrap',
+            gap: '8px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '0.92rem', fontWeight: '700', color: '#38bdf8' }}>
+                📊 股票期貨套利監控看板
+              </span>
+              <span style={{
+                fontSize: '0.75rem',
+                backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                color: '#38bdf8',
+                border: '1px solid rgba(56, 189, 248, 0.3)',
+                borderRadius: '12px',
+                padding: '1px 8px',
+                fontWeight: '600'
+              }}>
+                共 {filteredTargets.length} / {targetsList.length} 檔標的
+              </span>
+            </div>
+
+            {/* 右側操作區塊 (搜尋、更新、訂閱按鈕) */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+              {/* 第一排：搜尋、更新、月份選擇 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="🔍 搜尋股票名稱或代號..."
+                  style={{
+                    backgroundColor: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: '4px',
+                    padding: '3px 8px',
+                    color: '#f8fafc',
+                    fontSize: '0.8rem',
+                    outline: 'none',
+                    width: '160px'
+                  }}
+                />
+                <button
+                  onClick={handleGetStockFuturesTargets}
+                  disabled={isLoadingTargets}
+                  style={{
+                    padding: '3px 10px',
+                    backgroundColor: '#0284c7',
+                    color: '#ffffff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    fontWeight: '600',
+                    fontSize: '0.8rem',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    opacity: isLoadingTargets ? 0.6 : 1
+                  }}
+                >
+                  {isLoadingTargets ? '⏳ 載入中...' : '🔄 刷新標的'}
+                </button>
+
+                {/* 當月 / 次月 Radio 按鈕選項 */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  marginLeft: '4px',
+                  paddingLeft: '8px',
+                  borderLeft: '1px solid #334155'
+                }}>
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '3px',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    fontWeight: '600',
+                    color: contractMonthType === 'current' ? '#38bdf8' : '#94a3b8',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    <input
+                      type="radio"
+                      name="contractMonthType"
+                      value="current"
+                      checked={contractMonthType === 'current'}
+                      onChange={() => setContractMonthType('current')}
+                      style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
+                    />
+                    當月 ({getContractSuffix('current')})
+                  </label>
+
+                  <label style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '3px',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    fontWeight: '600',
+                    color: contractMonthType === 'next' ? '#38bdf8' : '#94a3b8',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    <input
+                      type="radio"
+                      name="contractMonthType"
+                      value="next"
+                      checked={contractMonthType === 'next'}
+                      onChange={() => setContractMonthType('next')}
+                      style={{ accentColor: '#38bdf8', cursor: 'pointer' }}
+                    />
+                    次月 ({getContractSuffix('next')})
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 表格區域 */}
+          <div style={{ flex: 1, overflow: 'auto' }}>
+            {targetsList.length === 0 ? (
+              <div style={{
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+                alignItems: 'center',
+                color: '#64748b',
+                padding: '40px 20px',
+                gap: '10px'
+              }}>
+                <div style={{ fontSize: '2.5rem' }}>🎯</div>
+                <div style={{ fontSize: '1rem', fontWeight: '600', color: '#94a3b8' }}>
+                  尚無比對資料，請點擊右側【🎯 取得股票期貨標的】
+                </div>
+                <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
+                  系統將自動對齊期交所股票期貨與富邦即時行情，依據價位區間 ({minStockPrice} ~ {maxStockPrice} 元) 產生套利監控表
+                </div>
+              </div>
+            ) : (
+              <table style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: '0.82rem',
+                color: '#e2e8f0',
+                textAlign: 'left',
+                lineHeight: '1.2'
+              }}>
+                <thead style={{
+                  position: 'sticky',
+                  top: 0,
+                  backgroundColor: '#0f172a',
+                  borderBottom: '2px solid #334155',
+                  zIndex: 10
+                }}>
+                  <tr>
+                    <th style={{ padding: '6px 8px', textAlign: 'left', color: '#94a3b8', fontWeight: '700' }}>1. 股票標的</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>2. 現貨代號</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'left', color: '#94a3b8', fontWeight: '700' }}>3. 期貨標的/規格</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>4. 期貨代號</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>5. 期貨買量 (BidVol)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>6. 期貨買價 (Bid1)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#38bdf8', fontWeight: '700' }}>7. 股票賣價 (Ask1)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#94a3b8', fontWeight: '700' }}>8. 股票賣量 (AskVol)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#f59e0b', fontWeight: '700' }}>9. 套利價差 (元)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#ef4444', fontWeight: '700' }}>10. 預估利潤 (金額)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right', color: '#ef4444', fontWeight: '700' }}>11. 套利空間 (%)</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center', color: '#94a3b8', fontWeight: '700' }}>12. 快速操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTargets.map((row, idx) => {
+                    const stockAskPrice = row.stockAskPrice != null ? row.stockAskPrice : (row.lastPrice != null ? row.lastPrice : row.closePrice);
+                    const stockAskVol = row.stockAskVol != null ? row.stockAskVol : null;
+                    const futBidPrice = row.futBidPrice != null ? row.futBidPrice : null;
+                    const futBidVol = row.futBidVol != null ? row.futBidVol : null;
+
+                    // 判斷現貨賣單數量是否不足 2 張 (對沖 1 口期貨需要 2 張股票，若 AskVol < 2 或是漲停無賣單則以灰階顯示)
+                    const isLowAskVol = stockAskVol == null || Number(stockAskVol) < 2;
+
+                    // 計算股票期貨完整代號
+                    const rootContract = (row.Contract || '').trim();
+                    const futSymbol5 = rootContract ? `${rootContract}${getContractSuffix(contractMonthType)}` : '';
+
+                    const hasSpread = futBidPrice != null && stockAskPrice != null;
+                    const spreadVal = row.spreadVal !== undefined ? row.spreadVal : (hasSpread ? (futBidPrice - stockAskPrice) : null);
+                    const profitVal = row.profitVal !== undefined ? row.profitVal : (row.estimatedProfit !== undefined ? row.estimatedProfit : null);
+                    const marginVal = row.marginVal !== undefined ? row.marginVal : (row.marginPercent !== undefined ? row.marginPercent : (hasSpread && stockAskPrice > 0 ? ((futBidPrice - stockAskPrice) / stockAskPrice * 100) : null));
+
+                    // 價差與利潤顏色：正數紅、負數綠 (台灣台股慣用)；當賣單 < 2 張時以灰階顯示
+                    const spreadColor = isLowAskVol ? '#64748b' : (spreadVal != null ? (spreadVal >= 0 ? '#ef4444' : '#10b981') : '#64748b');
+                    const profitColor = isLowAskVol ? '#64748b' : (profitVal != null ? (profitVal >= 0 ? '#ef4444' : '#10b981') : '#64748b');
+
+                    // 套利空間 (%) 徽章顏色
+                    let marginBg = 'rgba(100, 116, 139, 0.15)';
+                    let marginBorder = '#475569';
+                    let marginColor = '#94a3b8';
+                    if (!isLowAskVol && marginVal != null) {
+                      if (marginVal >= 0) {
+                        marginBg = 'rgba(239, 68, 68, 0.15)';
+                        marginBorder = '#ef4444';
+                        marginColor = '#f87171';
+                      } else {
+                        marginBg = 'rgba(16, 185, 129, 0.15)';
+                        marginBorder = '#10b981';
+                        marginColor = '#34d399';
+                      }
+                    }
+
+                    return (
+                      <tr
+                        key={`${row.StockCode}-${idx}`}
+                        style={{
+                          borderBottom: '1px solid #1e293b',
+                          backgroundColor: idx % 2 === 0 ? 'rgba(15, 23, 42, 0.35)' : 'transparent',
+                          opacity: isLowAskVol ? 0.75 : 1,
+                          transition: 'background-color 0.1s ease'
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(51, 65, 85, 0.45)'}
+                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = idx % 2 === 0 ? 'rgba(15, 23, 42, 0.35)' : 'transparent'}
+                      >
+                        {/* 1. 股票標的 (左對齊) */}
+                        <td style={{ padding: '4px 8px', fontWeight: '600', color: '#f8fafc', whiteSpace: 'nowrap' }}>
+                          {row.StockName || row.UnderlyingStock || '-'}
+                        </td>
+
+                        {/* 2. 現貨代號 (置中) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                          <span style={{
+                            fontFamily: 'monospace',
+                            fontWeight: '700',
+                            backgroundColor: '#0f172a',
+                            border: '1px solid #334155',
+                            color: '#38bdf8',
+                            padding: '1px 6px',
+                            borderRadius: '3px',
+                            fontSize: '0.78rem'
+                          }}>
+                            {row.StockCode}
+                          </span>
+                        </td>
+
+                        {/* 3. 期貨標的/規格 (左對齊) */}
+                        <td style={{ padding: '4px 8px', color: '#cbd5e1', whiteSpace: 'nowrap' }}>
+                          {row.StockName ? `${row.StockName}期 (${contractMonthType === 'current' ? '當月' : '次月'})` : futSymbol5}
+                        </td>
+
+                        {/* 4. 期貨代號 (置中 5 碼顯示) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                          <span style={{
+                            fontFamily: 'monospace',
+                            fontWeight: '700',
+                            backgroundColor: 'rgba(99, 102, 241, 0.15)',
+                            border: '1px solid rgba(99, 102, 241, 0.4)',
+                            color: '#818cf8',
+                            padding: '1px 6px',
+                            borderRadius: '3px',
+                            fontSize: '0.78rem'
+                          }}>
+                            {futSymbol5}
+                          </span>
+                        </td>
+
+                        {/* 5. 期貨買量 (BidVol) (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: futBidVol != null ? '#cbd5e1' : '#64748b', whiteSpace: 'nowrap' }}>
+                          {futBidVol != null ? futBidVol.toLocaleString() : '-'}
+                        </td>
+
+                        {/* 6. 期貨買價 (Bid1) (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: futBidPrice != null ? '#38bdf8' : '#64748b', whiteSpace: 'nowrap' }}>
+                          {futBidPrice != null ? futBidPrice.toFixed(2) : '-'}
+                        </td>
+
+                        {/* 7. 股票賣價 (Ask1) (右對齊) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '600', color: stockAskPrice != null ? '#38bdf8' : '#64748b', whiteSpace: 'nowrap' }}>
+                          {stockAskPrice != null ? Number(stockAskPrice).toFixed(2) : '-'}
+                        </td>
+
+                        {/* 8. 股票賣量 (AskVol) (右對齊，漲停或小於 2 張呈灰階) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', color: isLowAskVol ? '#64748b' : '#cbd5e1', fontWeight: isLowAskVol ? '400' : '600', whiteSpace: 'nowrap' }}>
+                          {stockAskVol != null ? (stockAskVol === 0 ? '0 (漲停)' : Number(stockAskVol).toLocaleString()) : '-'}
+                        </td>
+
+                        {/* 9. 套利價差 (元) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '800', color: spreadColor, whiteSpace: 'nowrap' }}>
+                          {spreadVal != null ? (spreadVal >= 0 ? `+${spreadVal.toFixed(2)}` : spreadVal.toFixed(2)) : '-'}
+                        </td>
+
+                        {/* 10. 預估利潤 (金額) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'monospace', fontWeight: '700', color: profitColor, whiteSpace: 'nowrap' }}>
+                          {profitVal != null ? profitVal.toLocaleString() : '-'}
+                        </td>
+
+                        {/* 11. 套利空間 (%) (右對齊 - 正數紅/負數綠，賣量<2灰階) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          {marginVal != null ? (
+                            <span style={{
+                              fontFamily: 'monospace',
+                              fontWeight: '700',
+                              backgroundColor: marginBg,
+                              border: `1px solid ${marginBorder}`,
+                              color: marginColor,
+                              padding: '1px 6px',
+                              borderRadius: '4px',
+                              fontSize: '0.78rem'
+                            }}>
+                              {marginVal >= 0 ? `+${marginVal.toFixed(2)}%` : `${marginVal.toFixed(2)}%`}
+                            </span>
+                          ) : (
+                            <span style={{ color: '#64748b', fontFamily: 'monospace' }}>-</span>
+                          )}
+                        </td>
+
+                        {/* 12. 快速操作 (置中) */}
+                        <td style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                          <button
+                            onClick={() => {
+                              if (isLowAskVol) {
+                                alert(`⚠️ 標的 ${row.StockCode} (${row.StockName}) 現貨賣單不足 2 張 (目前: ${stockAskVol ?? 0} 張)！無法滿足 1 口期貨所需 2 張對沖數量。`);
+                              } else {
+                                alert(`發動標的 ${row.StockCode} (${row.StockName}) 套利單`);
+                              }
+                            }}
+                            style={{
+                              backgroundColor: isLowAskVol ? 'rgba(100, 116, 139, 0.2)' : 'rgba(2, 132, 199, 0.2)',
+                              border: `1px solid ${isLowAskVol ? '#475569' : '#0284c7'}`,
+                              color: isLowAskVol ? '#94a3b8' : '#38bdf8',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '0.78rem',
+                              fontWeight: '600',
+                              cursor: 'pointer',
+                              transition: 'all 0.15s ease'
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = '#0284c7';
+                              e.currentTarget.style.color = '#ffffff';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = 'rgba(2, 132, 199, 0.2)';
+                              e.currentTarget.style.color = '#38bdf8';
+                            }}
+                          >
+                            ⚡ 下單
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         </main>
 
         {/* 右側測試區塊 (約 15% 寬度) */}
@@ -587,43 +1271,71 @@ export default function App() {
             </div>
           </div>
 
-          {/* 富邦 API 股票行情快照 (snapshot/quotes/{market}) 輸入與按鈕 */}
+          {/* 取得股票期貨標的按鈕 (依頁面頂部股價區間篩選) */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <label style={{ fontSize: '0.85rem', fontWeight: '600', color: '#94a3b8' }}>
-              股票行情快照 (市場別)
+              期貨標的篩選
             </label>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <input
-                type="text"
-                value={quoteMarket}
-                onChange={(e) => setQuoteMarket(e.target.value)}
-                placeholder="市場別 (TSE, OTC, ESB, TIB, PSB)"
+            <button
+              onClick={handleGetStockFuturesTargets}
+              style={{
+                width: '100%',
+                padding: '10px 16px',
+                backgroundColor: '#0284c7',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '8px',
+                fontWeight: '700',
+                fontSize: '0.9rem',
+                cursor: 'pointer',
+                boxShadow: '0 0 12px rgba(2, 132, 199, 0.3)',
+                transition: 'all 0.2s ease',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px'
+              }}
+            >
+              🎯 取得股票期貨標的
+            </button>
+
+            {/* 1.1 新增：訂閱股票 / 訂閱期貨按鈕並排 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+              <button
+                onClick={handleSubscribeStocks}
                 style={{
                   flex: 1,
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: '6px',
                   padding: '8px 10px',
-                  color: '#f8fafc',
-                  fontSize: '0.85rem',
-                  outline: 'none'
-                }}
-              />
-              <button
-                onClick={handleSnapshotQuotesConfirm}
-                style={{
-                  padding: '8px 14px',
-                  backgroundColor: '#0284c7',
+                  backgroundColor: '#10b981',
                   color: '#ffffff',
                   border: 'none',
                   borderRadius: '6px',
                   fontWeight: '600',
                   fontSize: '0.85rem',
                   cursor: 'pointer',
-                  whiteSpace: 'nowrap'
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 0 10px rgba(16, 185, 129, 0.2)'
                 }}
               >
-                行情快照
+                📈 訂閱股票
+              </button>
+              <button
+                onClick={handleSubscribeFutures}
+                style={{
+                  flex: 1,
+                  padding: '8px 10px',
+                  backgroundColor: '#8b5cf6',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontWeight: '600',
+                  fontSize: '0.85rem',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 0 10px rgba(139, 92, 246, 0.2)'
+                }}
+              >
+                📊 訂閱期貨
               </button>
             </div>
           </div>

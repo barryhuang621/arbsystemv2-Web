@@ -98,7 +98,23 @@ button {
   cursor: pointer;
   border: none;
   outline: none;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+/* 按鈕 hover 效果：微微變亮 */
+button:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* 按鈕 active 效果：按下去的手感回饋 */
+button:active {
+  filter: brightness(0.9);
+  transform: translateY(1px) scale(0.97);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  transition: all 0.05s ease;
 }
 
 input, select {
