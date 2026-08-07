@@ -186,18 +186,20 @@ export default function App() {
     const baseUrl = getApiBaseUrl();
 
     if (isQuoteConnected) {
-      // 點擊【斷線】：同時中斷 NAS -> 富邦，與 Web UI -> NAS WSS
+      // 點擊【斷線】：同時中斷 NAS -> 富邦，與 Web UI -> NAS WSS，並清空大表格
       try {
         const res = await fetch(`${baseUrl}/api/v1/fubon/disconnect`, { method: 'POST' });
         const data = await res.json();
         setApiResponse(data);
         disconnectWebSocket();
         setIsQuoteConnected(false);
+        setTargetsList([]); // 斷線時立刻清空表格資料
         alert(`中斷連線成功！(目標: ${baseUrl})\n${data.message || ''}`);
       } catch (err) {
         console.error('與 NAS 中斷連線通訊失敗:', err);
         disconnectWebSocket();
         setIsQuoteConnected(false);
+        setTargetsList([]); // 斷線時立刻清空表格資料
       }
     } else {
       // 點擊【連線】：同時觸發 NAS -> 登入富邦，與 Web UI -> NAS 建立 WSS
